@@ -1,0 +1,114 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+lib/
+lib64/
+MANIFEST
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+*.ipynb_checkpoints/
+
+# Distribution / packaging
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+pytestdebug.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Computer Vision / Data science
+# Datasets (large files should not be tracked)
+data/
+datasets/
+*.csv
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+
+# Model weights and checkpoints
+models/
+weights/
+checkpoints/
+*.pt
+*.pth
+*.onnx
+*.tflite
+*.pb
+*.h5
+*.keras
+
+# Images and videos (generated outputs only — sample/test images can still be tracked)
+output/
+results/
+output/**/*.jpg
+output/**/*.jpeg
+output/**/*.png
+output/**/*.gif
+output/**/*.bmp
+output/**/*.tiff
+output/**/*.tif
+results/**/*.jpg
+results/**/*.jpeg
+results/**/*.png
+results/**/*.gif
+results/**/*.bmp
+results/**/*.tiff
+results/**/*.tif
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# Logs
+logs/
+*.log
+runs/
+wandb/
+mlruns/
+
+# Misc
+.ipython/
+.matplotlib/
