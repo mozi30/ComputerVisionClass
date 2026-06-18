@@ -1,0 +1,668 @@
+\documentclass[10pt,a4paper]{article}
+
+\usepackage[margin=2.3cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{enumitem}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!50!black,
+    citecolor=blue!50!black,
+    urlcolor=blue!50!black
+}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.4em}
+\setlist{nosep}
+\title{\textbf{Autoencoder for Compression}}
+\author{Moritz Zideck\\Computer Vision Course}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This report documents the development and evaluation of convolutional
+autoencoders for learned compression of satellite imagery. A large,
+unlabelled collection of Amazon rainforest patches extracted from Sentinel-2
+imagery was used for self-supervised reconstruction training. Three model
+families were investigated: a baseline convolutional autoencoder, an
+autoencoder with an explicit latent-channel bottleneck, and a residual
+autoencoder with uniform latent quantisation and a rate--distortion-inspired
+loss. The reconstructed images were subsequently evaluated in a downstream
+semantic-segmentation task using a separately labelled Amazon rainforest
+dataset. This task-oriented experiment measures whether compression preserves
+information that is relevant to a computer-vision model rather than only
+visual similarity. The results show that high-quality JPEG and WebP preserve
+segmentation performance substantially better than the investigated learned
+models. The quantised autoencoder nevertheless provides a well-defined latent
+representation with theoretical fixed-length compression ratios between
+\(6{:}1\) and \(24{:}1\), depending on the number of latent channels.
+\end{abstract}
+
+\section{Motivation and Experimental Objective}
+
+Remote-sensing imagery is spatially large and is commonly acquired repeatedly
+over extensive geographical areas. Storage and transmission therefore become
+important practical constraints. Conventional codecs such as JPEG and WebP
+reduce image size through manually designed transforms, quantisation, and
+entropy coding. Learned image compression instead optimises an encoder and
+decoder directly from data. The encoder maps an image \(x\) to a latent
+representation \(z\), while the decoder reconstructs an approximation
+\(\hat{x}\):
+\begin{equation}
+    z = f_{\theta}(x), \qquad
+    \hat{x} = g_{\phi}(z).
+\end{equation}
+
+The main objective of this project was to investigate whether such a learned
+representation can reduce the amount of image data while retaining information
+needed by a semantic-segmentation model. The work was implemented in two
+Jupyter notebooks. The first notebook, \texttt{image\_compressor.ipynb},
+constructs and trains the compression models. The second notebook,
+\texttt{image\_segmentation.ipynb}, fine-tunes a segmentation network and
+evaluates it on original, autoencoder-reconstructed, JPEG-compressed, and
+WebP-compressed images.
+
+This separation also distinguishes the two learning objectives. Autoencoder
+training is self-supervised because the input image itself is the target.
+Segmentation training is supervised because every image is paired with a
+pixel-level mask. The final evaluation therefore tests transfer across both
+datasets and tasks.
+
+\section{Theoretical Background}
+
+\subsection{Autoencoders and Lossy Compression}
+
+An autoencoder consists of an analysis transform \(f_{\theta}\) and a synthesis
+transform \(g_{\phi}\). Compression is achieved by restricting the spatial
+resolution, channel count, numerical precision, or entropy of the latent
+representation. If the bottleneck is sufficiently constrained, the model must
+retain image structures that are useful for reconstruction while discarding
+less important information.
+
+The simplest reconstruction objective in this work is the mean squared error
+\begin{equation}
+    \mathcal{L}_{\mathrm{MSE}}
+    = \frac{1}{N}\sum_{i=1}^{N}(x_i-\hat{x}_i)^2.
+\end{equation}
+MSE strongly penalises large pixel deviations but can produce visually smooth
+results. The explicit-latent model therefore combines the mean absolute error
+and MSE:
+\begin{equation}
+    \mathcal{L}_{\mathrm{rec}}
+    = 0.8\,\lVert x-\hat{x}\rVert_1
+    + 0.2\,\mathcal{L}_{\mathrm{MSE}}.
+\end{equation}
+
+A practical codec additionally requires discrete symbols. Continuous
+floating-point activations cannot be directly represented as a compact bit
+stream. The quantised model maps a latent activation from \([-1,1]\) to one of
+256 uniformly spaced levels. Rounding is non-differentiable, so a
+straight-through estimator is used: the forward pass contains the rounded
+value, while the backward pass approximates the derivative by the identity.
+The loss is
+\begin{equation}
+    \mathcal{L}
+    = 0.85\,\lVert x-\hat{x}\rVert_1
+    + 0.15\,\mathcal{L}_{\mathrm{MSE}}
+    + \lambda\,\frac{1}{|z_q|}\sum_i |z_{q,i}|,
+\end{equation}
+where \(z_q\) is the quantised latent tensor and \(\lambda\) is the rate weight.
+The final term is a simple proxy encouraging smaller latent magnitudes. It is
+not a learned probability model and does not directly estimate the number of
+encoded bits. Modern learned codecs typically optimise an explicit
+rate--distortion objective using a probability model and entropy coding
+\cite{balle2018}.
+
+\subsection{Semantic Segmentation as a Task-Oriented Quality Measure}
+
+Semantic segmentation assigns a class label to every pixel. Fully
+convolutional networks perform this dense prediction without requiring a
+separate classifier for each image region \cite{long2015}. In this project, a
+pretrained FCN-ResNet50 model was adapted to two output classes and fine-tuned
+on Amazon rainforest masks.
+
+The primary evaluation metric is mean intersection over union (mIoU). For
+class \(c\),
+\begin{equation}
+    \mathrm{IoU}_c =
+    \frac{\mathrm{TP}_c}
+    {\mathrm{TP}_c+\mathrm{FP}_c+\mathrm{FN}_c},
+    \qquad
+    \mathrm{mIoU} = \frac{1}{C}\sum_{c=1}^{C}\mathrm{IoU}_c.
+\end{equation}
+The Dice score provides a related overlap measure,
+\begin{equation}
+    \mathrm{Dice}_c =
+    \frac{2\mathrm{TP}_c}
+    {2\mathrm{TP}_c+\mathrm{FP}_c+\mathrm{FN}_c}.
+\end{equation}
+Unlike a reconstruction-only metric, these measures expose whether compression
+removes boundaries, textures, or colour differences required by the
+segmentation network.
+
+\section{Data Preparation}
+
+\subsection{Self-Supervised Sentinel-2 Patches}
+
+The compression dataset was assembled from Sentinel-2 Level-2A imagery of the
+Amazon rainforest. The notebook contains an optional data-preparation pipeline
+that searches Microsoft Planetary Computer for scenes with less than
+10\,\% cloud cover, stacks bands B04, B03, and B02 into an RGB representation,
+and forms a temporal median composite. Random \(512\times512\) patches are then
+extracted from geographically larger scenes.
+
+The local experiment data contain 331 training patches and 200 validation
+patches. Each stored array has shape \(3\times512\times512\), uses
+\texttt{uint16}, and represents Sentinel reflectance values. During loading,
+values above 255 are divided by 10,000 and clipped to \([0,1]\). Since no
+labels are required, the larger variety of scenes can be used directly for
+reconstruction learning.
+
+\subsection{Supervised Amazon Rainforest Segmentation Dataset}
+
+The downstream task uses ``Amazon Rainforest dataset for semantic segmentation
+V2'' \cite{bragagnolo2020}. The public dataset is derived from Sentinel-2
+Level-2A RGB bands and provides \(512\times512\) images with associated binary
+masks. Its published split contains 1,123 training images, 100 validation
+images, and 100 test images. The notebook loader pairs images and masks,
+converts masks to two classes, and resizes both to \(512\times512\).
+
+For the documented full notebook run, a deterministic subset of 30 training
+images and 15 validation images was used. This reduced experiment was
+sufficient to verify the complete training and comparison workflow but limits
+the statistical strength of the conclusions. The compression and segmentation
+datasets are intentionally separate: the autoencoder learns general
+reconstruction from the larger unlabelled patch corpus, while the labelled
+dataset measures the preservation of task-relevant information.
+
+\section{Implemented Compression Models}
+
+\subsection{Baseline Convolutional Autoencoder}
+
+The baseline architecture contains a configurable sequence of convolution,
+batch-normalisation, ReLU, and max-pooling blocks. Every encoder block halves
+the spatial dimensions and increases the channel count. The decoder uses
+transposed convolutions to restore the image resolution, followed by a sigmoid
+output. Eight checkpoints cover encoder depths from one to four and base
+channel counts of 32 and 64. This architecture was useful for studying the
+effect of depth, but it does not define a low-channel, quantised bottleneck.
+Consequently, several internal representations contain more bytes than the
+original 8-bit RGB image.
+
+\subsection{Explicit-Latent Autoencoder}
+
+The second architecture uses a convolutional stem, three stride-two
+downsampling stages, a \(1\times1\) convolution to an explicit latent width,
+and a symmetric decoder. Models were produced with base widths 32 and 64 and
+latent widths 8, 16, and 32. A hyperbolic tangent bounds the latent values, and
+small uniform noise can be added during training to approximate the
+perturbation caused by later quantisation. However, the evaluated checkpoints
+store and process the latent tensor as \texttt{float32}; therefore this model
+is a compact representation but not yet a complete compressed-file format.
+
+\subsection{Quantised Compressive Autoencoder}
+
+The final architecture adds residual blocks before and after every scale
+change. The encoder depth is four, the base width is 32, and two residual
+blocks are used at each stage. The latent tensor is quantised to 256 values,
+corresponding to an ideal fixed-length representation of eight bits per latent
+symbol. Nine models combine latent widths \(L\in\{8,16,32\}\) with rate weights
+\(\lambda\in\{10^{-4},10^{-3},5\cdot10^{-3}\}\). They were trained for 40
+epochs using Adam with a learning rate of \(10^{-3}\), a training batch size of
+4, and a validation batch size of 8.
+
+\section{Compression-Rate Calculation}
+
+The input is treated as an 8-bit RGB image for codec comparison, giving
+\begin{equation}
+    B_{\mathrm{input}} = 512\cdot512\cdot3\cdot8
+    \quad\text{bits}.
+\end{equation}
+For every model, the latent payload is calculated as
+\begin{equation}
+    B_{\mathrm{latent}} = H_zW_zC_zb,\qquad
+    \mathrm{bpp} = \frac{B_{\mathrm{latent}}}{512\cdot512},\qquad
+    R = \frac{B_{\mathrm{input}}}{B_{\mathrm{latent}}},
+\end{equation}
+where \(H_z,W_z,C_z\) are the latent dimensions and \(b\) is the number of
+bits used for each latent value. A ratio above \(1{:}1\) indicates
+compression; a ratio below \(1{:}1\) indicates expansion.
+
+\subsection{Baseline-Model Rates}
+
+For a baseline model with encoder depth \(d\) and base width \(B\), the
+bottleneck has
+\begin{equation}
+    C_z=B\,2^{d-1},\qquad H_z=W_z=\frac{512}{2^d}.
+\end{equation}
+These models retain float32 activations, so \(b=32\). Table~\ref{tab:legacy-rates}
+shows that none of the eight baseline checkpoints compresses the raw 8-bit
+RGB payload.
+
+\begin{table}[ht]
+\centering
+\small
+\caption{Latent payload calculation for all baseline autoencoders.}
+\begin{tabular}{rrrrr}
+\toprule
+Depth & Base width & Bottleneck shape & Float32 bpp & Input:latent ratio \\
+\midrule
+1 & 32 & \(32\times256\times256\) & 256 & \(0.094{:}1\) \\
+2 & 32 & \(64\times128\times128\) & 128 & \(0.188{:}1\) \\
+3 & 32 & \(128\times64\times64\)  & 64  & \(0.375{:}1\) \\
+4 & 32 & \(256\times32\times32\)  & 32  & \(0.750{:}1\) \\
+1 & 64 & \(64\times256\times256\) & 512 & \(0.047{:}1\) \\
+2 & 64 & \(128\times128\times128\)& 256 & \(0.094{:}1\) \\
+3 & 64 & \(256\times64\times64\)  & 128 & \(0.188{:}1\) \\
+4 & 64 & \(512\times32\times32\)  & 64  & \(0.375{:}1\) \\
+\bottomrule
+\end{tabular}
+\label{tab:legacy-rates}
+\end{table}
+
+\subsection{Explicit-Latent and Quantised-Model Rates}
+
+The explicit-latent and quantised architectures perform three spatial
+downsampling operations, so the latent shape is \(L\times64\times64\).
+Table~\ref{tab:latent-rates} includes every explicit-latent checkpoint. Base
+width changes the encoder and decoder capacity but not the latent payload.
+Because these checkpoints use float32 latent values, their implemented
+representation rates are \(6{:}1\), \(3{:}1\), and \(1.5{:}1\). The 8-bit
+column is a hypothetical rate that would require adding quantisation to this
+model family.
+
+\begin{table}[ht]
+\centering
+\small
+\caption{Latent payload calculation for all explicit-latent autoencoders.}
+\begin{tabular}{rrrrrr}
+\toprule
+Base & \(L\) & Latent shape & Float32 bpp & Float32 ratio &
+Hypothetical 8-bit ratio \\
+\midrule
+32 & 8  & \(8\times64\times64\)  & 4  & \(6{:}1\)   & \(24{:}1\) \\
+32 & 16 & \(16\times64\times64\) & 8  & \(3{:}1\)   & \(12{:}1\) \\
+32 & 32 & \(32\times64\times64\) & 16 & \(1.5{:}1\) & \(6{:}1\) \\
+64 & 8  & \(8\times64\times64\)  & 4  & \(6{:}1\)   & \(24{:}1\) \\
+64 & 16 & \(16\times64\times64\) & 8  & \(3{:}1\)   & \(12{:}1\) \\
+64 & 32 & \(32\times64\times64\) & 16 & \(1.5{:}1\) & \(6{:}1\) \\
+\bottomrule
+\end{tabular}
+\label{tab:latent-rates}
+\end{table}
+
+All nine quantised checkpoints use 256 levels, or eight bits per latent
+symbol. Their complete rate calculation is shown in
+Table~\ref{tab:quantised-rates}. The rate weight affects training but does not
+change the fixed-length payload for a given \(L\).
+
+\begin{table}[ht]
+\centering
+\small
+\caption{Fixed-length latent rates for all quantised autoencoders.}
+\begin{tabular}{rrrrr}
+\toprule
+\(\lambda\) & \(L\) & Latent shape & bpp & Input:latent ratio \\
+\midrule
+\(10^{-4}\) & 8  & \(8\times64\times64\)  & 1 & \(24{:}1\) \\
+\(10^{-4}\) & 16 & \(16\times64\times64\) & 2 & \(12{:}1\) \\
+\(10^{-4}\) & 32 & \(32\times64\times64\) & 4 & \(6{:}1\) \\
+\(10^{-3}\) & 8  & \(8\times64\times64\)  & 1 & \(24{:}1\) \\
+\(10^{-3}\) & 16 & \(16\times64\times64\) & 2 & \(12{:}1\) \\
+\(10^{-3}\) & 32 & \(32\times64\times64\) & 4 & \(6{:}1\) \\
+\(0.005\)   & 8  & \(8\times64\times64\)  & 1 & \(24{:}1\) \\
+\(0.005\)   & 16 & \(16\times64\times64\) & 2 & \(12{:}1\) \\
+\(0.005\)   & 32 & \(32\times64\times64\) & 4 & \(6{:}1\) \\
+\bottomrule
+\end{tabular}
+\label{tab:quantised-rates}
+\end{table}
+
+Thus the quantised models theoretically remove 95.8\,\%, 91.7\,\%, and
+83.3\,\% of the raw RGB payload for 8, 16, and 32 latent channels,
+respectively. All reported rates exclude model parameters because the same
+decoder can be reused for many images. They also exclude headers and do not
+exploit symbol probabilities. No entropy coder or serialised latent-file
+container was implemented, so the tables report representation rates rather
+than measured on-disk compression ratios.
+
+\section{Segmentation Experiment}
+
+The segmentation notebook creates an FCN-ResNet50 model with pretrained
+torchvision weights and replaces its output for two classes. All parameters
+are fine-tuned using AdamW at a learning rate of \(10^{-4}\) for 20 epochs.
+The \texttt{VisionTrainer} saves latest and best checkpoints, while
+\texttt{LoopEvaluator} and a shared metric accumulator calculate loss, mIoU,
+mean accuracy, and Dice score.
+
+For a fair comparison, every image variant uses the same validation samples,
+masks, normalisation, segmentation model, and metric implementation. The
+baseline receives the original image. Autoencoder variants pass the image
+through a loaded checkpoint before normalisation. JPEG and WebP variants are
+encoded and decoded in memory at quality settings 35, 65, and 90. Failures are
+recorded per variant so that one incompatible checkpoint does not terminate
+the complete experiment.
+
+\section{Results and Discussion}
+
+\subsection{Complete Segmentation Results}
+
+Tables~\ref{tab:classic-results}--\ref{tab:quantised-results} report every
+completed variant from the full 15-image validation run. The delta is measured
+relative to the original-image mIoU of 0.8412.
+
+\begin{table}[ht]
+\centering
+\small
+\caption{Original-image and conventional-codec results.}
+\begin{tabular}{lrrr}
+\toprule
+Input variant & mIoU & Dice & \(\Delta\)mIoU \\
+\midrule
+Original images & 0.8412 & 0.9137 & 0.0000 \\
+JPEG, quality 35 & 0.7125 & 0.8320 & -0.1286 \\
+JPEG, quality 65 & 0.7690 & 0.8694 & -0.0722 \\
+JPEG, quality 90 & 0.8370 & 0.9113 & -0.0042 \\
+WebP, quality 35 & 0.5936 & 0.7439 & -0.2476 \\
+WebP, quality 65 & 0.7249 & 0.8404 & -0.1163 \\
+WebP, quality 90 & 0.8316 & 0.9080 & -0.0096 \\
+\bottomrule
+\end{tabular}
+\label{tab:classic-results}
+\end{table}
+
+\begin{table}[ht]
+\centering
+\small
+\caption{Results for all baseline autoencoders.}
+\begin{tabular}{rrrrr}
+\toprule
+Depth & Base width & mIoU & Dice & \(\Delta\)mIoU \\
+\midrule
+1 & 32 & 0.6014 & 0.7493 & -0.2398 \\
+2 & 32 & 0.5391 & 0.6978 & -0.3021 \\
+3 & 32 & 0.3795 & 0.5237 & -0.4616 \\
+4 & 32 & 0.3024 & 0.4353 & -0.5388 \\
+1 & 64 & 0.6978 & 0.8212 & -0.1434 \\
+2 & 64 & 0.4383 & 0.5964 & -0.4029 \\
+3 & 64 & 0.4623 & 0.6191 & -0.3789 \\
+4 & 64 & 0.5152 & 0.6750 & -0.3260 \\
+\bottomrule
+\end{tabular}
+\label{tab:legacy-results}
+\end{table}
+
+\begin{table}[ht]
+\centering
+\small
+\caption{Results for all explicit-latent autoencoders.}
+\begin{tabular}{rrrrr}
+\toprule
+Base width & \(L\) & mIoU & Dice & \(\Delta\)mIoU \\
+\midrule
+32 & 8  & 0.2767 & 0.3714 & -0.5644 \\
+32 & 16 & 0.2680 & 0.3567 & -0.5732 \\
+32 & 32 & 0.2611 & 0.3431 & -0.5801 \\
+64 & 8  & 0.2593 & 0.3455 & -0.5819 \\
+64 & 16 & 0.2612 & 0.3435 & -0.5800 \\
+64 & 32 & 0.2620 & 0.3461 & -0.5792 \\
+\bottomrule
+\end{tabular}
+\label{tab:latent-results}
+\end{table}
+
+\begin{table}[ht]
+\centering
+\small
+\caption{Results for all quantised autoencoders.}
+\begin{tabular}{rrrrr}
+\toprule
+\(\lambda\) & \(L\) & mIoU & Dice & \(\Delta\)mIoU \\
+\midrule
+\(10^{-4}\) & 8  & 0.2587 & 0.3420 & -0.5824 \\
+\(10^{-4}\) & 16 & 0.4857 & 0.6475 & -0.3554 \\
+\(10^{-4}\) & 32 & 0.2724 & 0.3631 & -0.5688 \\
+\(10^{-3}\) & 8  & 0.4733 & 0.6317 & -0.3678 \\
+\(10^{-3}\) & 16 & 0.2674 & 0.3555 & -0.5737 \\
+\(10^{-3}\) & 32 & 0.2726 & 0.3638 & -0.5685 \\
+\(0.005\)   & 8  & 0.2632 & 0.3472 & -0.5779 \\
+\(0.005\)   & 16 & 0.4028 & 0.5519 & -0.4383 \\
+\(0.005\)   & 32 & 0.4641 & 0.6233 & -0.3770 \\
+\bottomrule
+\end{tabular}
+\label{tab:quantised-results}
+\end{table}
+
+\clearpage
+
+The original-image baseline reached an mIoU of 0.8412 and a Dice score of
+0.9137. JPEG at quality 90 was almost unchanged, losing only 0.0042 mIoU.
+WebP at quality 90 also remained close to the baseline. This indicates that
+the segmentation model is robust to mild conventional compression.
+
+The strongest learned-model result was obtained by the shallow legacy
+autoencoder with 64 base channels. Its mIoU of 0.6978 is substantially below
+the baseline and below JPEG quality 35. More importantly, this legacy model
+does not provide an actual storage reduction when its float32 bottleneck is
+counted. Its accuracy is therefore not evidence of a favourable
+rate--distortion trade-off.
+
+Among the genuinely quantised models, \(L=16\) and
+\(\lambda=10^{-4}\) performed best with mIoU 0.4857. According to
+Table~\ref{tab:quantised-rates}, this model has a theoretical fixed-length ratio of
+\(12{:}1\). The \(L=8,\lambda=10^{-3}\) model achieved a similar mIoU of
+0.4733 at a more aggressive \(24{:}1\) ratio. The results do not show a
+monotonic relationship between latent width, rate weight, and segmentation
+accuracy. For example, increasing the latent width did not consistently
+improve the downstream task. This suggests that optimisation stability and
+the reconstruction objective were more influential than latent capacity
+alone.
+
+The explicit-latent, non-quantised models generally performed poorly. Their
+reconstructions often caused the segmentation network to favour one class,
+which is visible in the very low IoU for the other class in the recorded
+per-class metrics. A pixel-reconstruction objective does not explicitly
+protect semantic boundaries. Colour shifts or smoothing that appear
+acceptable visually can therefore be destructive for a model trained on the
+original image distribution.
+
+\section{Comparison with Published Compression Tests}
+
+Published compression results must be compared cautiously because the
+datasets, bit-depths, codecs, and quality metrics differ. Standard learned
+image-compression papers commonly use natural-image datasets such as Kodak and
+report PSNR or MS-SSIM as a function of measured bits per pixel. In contrast,
+the present experiment uses Sentinel-2 imagery and reports segmentation mIoU
+after reconstruction. The comparison is therefore methodological rather than
+a direct leaderboard comparison.
+
+Ball\'e et al.\ implemented a complete nonlinear transform codec containing
+quantisation, a learned probability model, and entropy coding
+\cite{balle2017}. Their measured rate--distortion curves generally exceeded
+JPEG and JPEG 2000, particularly under perceptual MS-SSIM evaluation. Later,
+Cheng et al.\ improved the entropy model with discretised Gaussian mixtures
+and attention, obtaining performance comparable to the VVC reference codec on
+natural-image PSNR tests \cite{cheng2020}. At a constrained rate of
+0.15 bpp, a related low-rate model reported MS-SSIM values of 0.9761 and
+0.9802 on the CLIC validation and test sets, respectively
+\cite{cheng2020lowrate}. These systems differ fundamentally from the current
+prototype because they optimise an expected code length and generate an
+entropy-coded bitstream. The rate term used in this project only penalises the
+mean latent magnitude; it cannot exploit non-uniform symbol frequencies.
+
+L\"ohdefink et al.\ provide a more task-relevant comparison
+\cite{lohdefink2019}. They evaluated JPEG, JPEG2000, WebP, and a GAN-based
+autoencoder using downstream semantic-segmentation mIoU. At 0.0625 bpp, their
+GAN reconstruction exceeded JPEG2000 by 3.9 absolute mIoU percentage points,
+even though JPEG2000 had a 5.91 dB PSNR advantage. When the segmentation model
+was trained on GAN reconstructions, its mIoU improved by almost 20 absolute
+percentage points relative to applying a model trained only on original
+images. This result supports two important interpretations of the present
+experiment. First, reconstruction PSNR and semantic usefulness need not agree.
+Second, the domain mismatch between original and reconstructed images can be
+reduced by adapting the downstream model. The current segmentation network was
+trained on original images and then tested on autoencoder outputs, so it did
+not receive this adaptation benefit.
+
+The closest Earth-observation comparison is the recent study by Molli\`ere
+et al.\ \cite{molliere2025}. It compared JPEG2000 with a learned codec using a
+discretised Gaussian-mixture likelihood on fire, cloud, and building
+segmentation. Learned compression clearly outperformed JPEG2000 on the large
+10-channel Sentinel-2 building dataset, but JPEG2000 remained superior on the
+smaller single-channel thermal datasets. Their end-to-end compression and
+segmentation optimisation also failed to improve over separately optimised
+components. For one low-quality building experiment, joint optimisation
+changed the result from 0.00008 bpp, 25.76 dB, and F1 0.4925 to 0.4407 bpp,
+49.80 dB, and F1 0.7090. A high-quality starting point remained approximately
+0.61 bpp with F1 near 0.72. The authors concluded that learned compression is
+most advantageous when abundant training data and spectral redundancy are
+available.
+
+\begin{table}[ht]
+\centering
+\small
+\caption{Contextual comparison with related compression evaluations. Values
+are not directly comparable across datasets and metrics.}
+\begin{tabular}{p{3.0cm}p{2.35cm}p{2.25cm}p{6.2cm}}
+\toprule
+Study & Domain and task & Rate & Main observation \\
+\midrule
+This project & Sentinel-2 RGB forest segmentation & 1--4 bpp
+& Quantised AE mIoU 0.2587--0.4857; JPEG/WebP quality 90 remained close to
+the 0.8412 baseline. \\
+L\"ohdefink et al. & Automotive semantic segmentation & 0.0625 bpp
+& GAN codec exceeded JPEG2000 by 3.9 mIoU points; training segmentation on
+decoded images produced a much larger gain. \\
+Molli\`ere et al. & EO fire, cloud, and building segmentation & variable;
+example 0.4407 bpp
+& Learned coding won on the large multispectral dataset, while JPEG2000 was
+stronger on smaller single-channel datasets. \\
+Cheng et al. & Natural-image reconstruction & 0.15 bpp
+& Low-rate learned codec reached 0.9761/0.9802 MS-SSIM on CLIC
+validation/test data. \\
+\bottomrule
+\end{tabular}
+\label{tab:literature}
+\end{table}
+
+Compared with these studies, the present quantised models use substantially
+higher fixed-length rates of 1--4 bpp while producing a larger loss of
+downstream accuracy. This does not imply that autoencoder compression is
+unsuitable for Sentinel-2 imagery. Rather, it shows that an explicit entropy
+model, a measured bitstream, greater training diversity, and decoder-domain
+adaptation are central parts of competitive learned compression. The strong
+JPEG/WebP results in this test are consistent with Molli\`ere et al.'s finding
+that traditional codecs remain difficult to beat when the learned system is
+small or insufficiently matched to its data and task.
+
+\section{Limitations and Future Work}
+
+The principal limitation is the size of the downstream experiment: only 30
+training and 15 validation images were selected from the larger public
+dataset. The values in Tables~\ref{tab:classic-results}--\ref{tab:quantised-results}
+demonstrate the implemented
+workflow but should not be interpreted as a definitive benchmark. Repeating
+the experiment on the full published split and reporting means and confidence
+intervals across several random seeds would strengthen the analysis.
+
+The quantised model is also not a complete learned codec. Its magnitude
+penalty is only a rate proxy, and the quantised symbols are neither modelled
+probabilistically nor entropy-coded. A future implementation should learn a
+latent probability model, encode symbols with arithmetic or range coding, and
+measure actual byte lengths. This would permit direct rate--distortion curves
+against JPEG and WebP in bits per pixel.
+
+Further improvements include training with perceptual or multi-scale losses,
+adding an edge-preservation term, and including the segmentation loss during
+compressor training. The latter would create a task-aware codec that explicitly
+preserves information needed for forest segmentation. Finally, reconstruction
+quality should be reported with PSNR and SSIM alongside downstream metrics to
+separate visual fidelity from task fidelity.
+
+\section{Conclusion}
+
+The project established an end-to-end experimental pipeline for learned
+satellite-image compression and downstream semantic-segmentation evaluation.
+Three generations of autoencoder architecture were implemented, culminating
+in a residual model with an explicit, uniformly quantised latent bottleneck.
+Theoretical fixed-length compression ratios of \(24{:}1\), \(12{:}1\), and
+\(6{:}1\) were obtained for latent widths 8, 16, and 32. However, the
+segmentation experiment showed a clear quality gap between the learned models
+and conventional high-quality JPEG or WebP.
+
+The main conclusion is that dimensional reduction alone is not sufficient for
+effective image compression. A useful learned codec requires discrete latent
+symbols, an accurate rate model, entropy coding, and an objective aligned with
+the information that must be preserved. The notebooks provide the foundation
+for this next step and, importantly, evaluate compression according to its
+effect on a real computer-vision task.
+
+\begin{thebibliography}{9}
+
+\bibitem{balle2018}
+J. Ball\'e, D. Minnen, S. Singh, S. J. Hwang, and N. Johnston,
+``Variational Image Compression with a Scale Hyperprior,''
+\emph{International Conference on Learning Representations}, 2018.
+\url{https://arxiv.org/abs/1802.01436}.
+
+\bibitem{balle2017}
+J. Ball\'e, V. Laparra, and E. P. Simoncelli,
+``End-to-End Optimized Image Compression,''
+\emph{International Conference on Learning Representations}, 2017.
+\url{https://arxiv.org/abs/1611.01704}.
+
+\bibitem{cheng2020}
+Z. Cheng, H. Sun, M. Takeuchi, and J. Katto,
+``Learned Image Compression with Discretized Gaussian Mixture Likelihoods
+and Attention Modules,''
+\emph{IEEE Conference on Computer Vision and Pattern Recognition}, 2020.
+\url{https://arxiv.org/abs/2001.01568}.
+
+\bibitem{cheng2020lowrate}
+Z. Cheng, H. Sun, and J. Katto,
+``Low Bitrate Image Compression with Discretized Gaussian Mixture
+Likelihoods,''
+\emph{CVPR Workshop on Learned Image Compression}, 2020.
+\url{https://arxiv.org/abs/2004.04318}.
+
+\bibitem{lohdefink2019}
+J. L\"ohdefink, A. B\"ar, N. M. Schmidt, F. H\"uger, P. Schlicht, and
+T. Fingscheidt,
+``GAN- vs. JPEG2000 Image Compression for Distributed Automotive
+Perception: Higher Peak SNR Does Not Mean Better Semantic Segmentation,''
+2019. \url{https://arxiv.org/abs/1902.04311}.
+
+\bibitem{molliere2025}
+C. Molli\`ere, I. Cumplido, M. Zeulner, L. Liesenhoff, M. Schubert, and
+J. Gottfriedsen,
+``Learned Image Compression for Earth Observation: Implications for
+Downstream Segmentation Tasks,'' 2025.
+\url{https://arxiv.org/abs/2512.01788}.
+
+\bibitem{long2015}
+J. Long, E. Shelhamer, and T. Darrell,
+``Fully Convolutional Networks for Semantic Segmentation,''
+\emph{IEEE Conference on Computer Vision and Pattern Recognition}, 2015.
+\url{https://arxiv.org/abs/1411.4038}.
+
+\bibitem{bragagnolo2020}
+L. Bragagnolo, R. V. da Silva, and J. M. V. Grzybowski,
+``Amazon Rainforest Dataset for Semantic Segmentation V2,''
+Zenodo, 2020.
+\url{https://doi.org/10.5281/zenodo.3994970}.
+
+\end{thebibliography}
+
+\end{document}
